@@ -1,3 +1,39 @@
+# Setup
+
+Follow these steps to set up the environment before running any training or planning scripts.
+
+### 1. Download MuJoCo License Key
+
+Download the MuJoCo license key from:
+
+[https://roboti.us/file/mjkey.txt](https://roboti.us/file/mjkey.txt)
+
+Place the downloaded `mjkey.txt` file in the `extras/` directory:
+
+```
+mkdir -p extras
+mv ~/Downloads/mjkey.txt ./extras/
+```
+
+### 2. Install Conda Environment
+
+Install dependencies using the provided `environment.yml` file:
+
+```
+conda env create -f environment.yml
+conda activate diffuser
+```
+
+### 3. Install MuJoCo Extras
+
+Run the script to install MuJoCo binaries and setup symlinks:
+
+```
+./extras/mujoco_extra.sh
+```
+
+After this setup, you're ready to use the pretrained models or train from scratch.
+
 # Planning with Diffusion &nbsp;&nbsp; [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1YajKhu-CUIGBJeQPehjVPJcK_b38a8Nc?usp=sharing)
 
 
