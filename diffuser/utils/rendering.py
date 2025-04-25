@@ -296,6 +296,14 @@ class MazeRenderer:
         colors = plt.cm.jet(np.linspace(0,1,path_length))
         plt.plot(observations[:,1], observations[:,0], c='black', zorder=10)
         plt.scatter(observations[:,1], observations[:,0], c=colors, zorder=20)
+
+        # --- START MINIMAL ADDITION ---
+        if conditions is not None and isinstance(conditions, dict):
+            if 0 in conditions: plt.scatter(conditions[0][1], conditions[0][0], marker='+', c='white', s=150, zorder=30) # Plot white '+' start marker
+            end_keys = [k for k in conditions if k != 0] # Find potential end keys
+            if end_keys: plt.scatter(conditions[max(end_keys)][1], conditions[max(end_keys)][0], marker='+', c='black', s=150, zorder=30) # Plot black '+' end marker
+        # --- END MINIMAL ADDITION ---
+        
         plt.axis('off')
         plt.title(title)
         img = plot2img(fig, remove_margins=self._remove_margins)
@@ -326,29 +334,44 @@ class Maze2dRenderer(MazeRenderer):
         self.env_name = env
         self.env = load_environment(env)
         self.observation_dim = np.prod(self.env.observation_space.shape)
-        self.action_dim = np.prod(self.env.action_space.shape)
-        self.goal = None
-        self._background = self.env.maze_arr == 10
+        self.action_dim      = np.prod(self.env.action_space.shape)
+        self.goal            = None
+        self._background     = self.env.maze_arr == 10
         self._remove_margins = False
-        self._extent = (0, 1, 1, 0)
+        self._extent         = (0, 1, 1, 0)
 
     def renders(self, observations, conditions=None, **kwargs):
         bounds = MAZE_BOUNDS[self.env_name]
 
-        observations = observations + .5
+        # shift into center of each cell
+        observations = observations + 0.5
+
+        # scale into [0,1]×[0,1]
         if len(bounds) == 2:
             _, scale = bounds
             observations /= scale
-        elif len(bounds) == 4:
+        else:
             _, iscale, _, jscale = bounds
             observations[:, 0] /= iscale
             observations[:, 1] /= jscale
-        else:
-            raise RuntimeError(f'Unrecognized bounds for {self.env_name}: {bounds}')
 
+        # now apply the same +0.5→scale transform to any condition points
         if conditions is not None:
-            conditions /= scale
+            for k, v in list(conditions.items()):
+                arr = np.array(v).flatten()
+                if arr.size >= 2:
+                    arr = arr + 0.5
+                    if len(bounds) == 2:
+                        conditions[k] = arr / scale
+                    else:
+                        conditions[k] = np.array([
+                            arr[0] / iscale,
+                            arr[1] / jscale
+                        ])
+
+        # delegate the actual plotting to the parent class
         return super().renders(observations, conditions, **kwargs)
+
 
 #-----------------------------------------------------------------------------#
 #---------------------------------- rollouts ---------------------------------#

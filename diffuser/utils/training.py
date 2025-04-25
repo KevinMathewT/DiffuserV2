@@ -1,13 +1,16 @@
 import os
+import math
 import copy
 import numpy as np
 import torch
 import einops
 import pdb
+from gym.vector import SyncVectorEnv
 
 from .arrays import batch_to_device, to_np, to_device, apply_dict
 from .timer import Timer
 from .cloud import sync_logs
+from diffuser.datasets.d4rl import load_environment
 
 def cycle(dl):
     while True:
@@ -53,6 +56,8 @@ class Trainer(object):
         n_reference=8,
         n_samples=2,
         bucket=None,
+        n_train_steps=100000,
+        warmup_steps=10000,
     ):
         super().__init__()
         self.model = diffusion_model
@@ -72,13 +77,27 @@ class Trainer(object):
 
         self.dataset = dataset
         self.dataloader = cycle(torch.utils.data.DataLoader(
-            self.dataset, batch_size=train_batch_size, num_workers=1, shuffle=True, pin_memory=True
+            self.dataset, batch_size=train_batch_size, num_workers=8, shuffle=True, pin_memory=True
         ))
         self.dataloader_vis = cycle(torch.utils.data.DataLoader(
-            self.dataset, batch_size=1, num_workers=0, shuffle=True, pin_memory=True
+            self.dataset, batch_size=1, num_workers=8, shuffle=True, pin_memory=True
         ))
         self.renderer = renderer
-        self.optimizer = torch.optim.Adam(diffusion_model.parameters(), lr=train_lr)
+
+        # self.optimizer = torch.optim.Adam(diffusion_model.parameters(), lr=train_lr)
+        self.optimizer = torch.optim.AdamW(
+            diffusion_model.parameters(),
+            lr=train_lr,
+            weight_decay=1e-4,
+            betas=(0.9,0.999)
+        )
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step) / float(max(1, warmup_steps))
+            progress = float(step - warmup_steps) / float(max(1, n_train_steps - warmup_steps))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
 
         self.logdir = results_folder
         self.bucket = bucket
@@ -114,6 +133,7 @@ class Trainer(object):
                 loss.backward()
 
             self.optimizer.step()
+            self.scheduler.step()   
             self.optimizer.zero_grad()
 
             if self.step % self.update_ema_every == 0:
@@ -124,14 +144,17 @@ class Trainer(object):
                 self.save(label)
 
             if self.step % self.log_freq == 0:
+                lr = self.optimizer.param_groups[0]['lr']
                 infos_str = ' | '.join([f'{key}: {val:8.4f}' for key, val in infos.items()])
-                print(f'{self.step}: {loss:8.4f} | {infos_str} | t: {timer():8.4f}')
+                print(f'{self.step}: {loss:8.4f} | {infos_str} | t: {timer():8.4f} | lr: {lr:.12f}')
 
             if self.step == 0 and self.sample_freq:
                 self.render_reference(self.n_reference)
 
             if self.sample_freq and self.step % self.sample_freq == 0:
-                self.render_samples(n_samples=self.n_samples)
+                avg_rewards = self.render_samples(n_samples=self.n_samples)
+                print(f'[ eval ] average reward at step {i}: {avg_rewards}')
+                self.evaluate_batch_score() # new: evaluate a larger batch of rollouts and print avg score
 
             self.step += 1
 
@@ -173,7 +196,7 @@ class Trainer(object):
 
         ## get a temporary dataloader to load a single batch
         dataloader_tmp = cycle(torch.utils.data.DataLoader(
-            self.dataset, batch_size=batch_size, num_workers=0, shuffle=True, pin_memory=True
+            self.dataset, batch_size=batch_size, num_workers=8, shuffle=True, pin_memory=True
         ))
         batch = dataloader_tmp.__next__()
         dataloader_tmp.close()
@@ -195,53 +218,129 @@ class Trainer(object):
         # observations = blocks_add_kuka(observations)
         ####
 
+        # also show the start condition on the reference plots
+        # unnormalize the single condition dict
+        orig_cond = batch.conditions                    # {0: normed_obs}
+        unnorm = {
+            k: self.dataset.normalizer.unnormalize(v, 'observations')
+            for k, v in orig_cond.items()
+        }
+        conds = [unnorm] * observations.shape[0]        # one per path row
         savepath = os.path.join(self.logdir, f'_sample-reference.png')
-        self.renderer.composite(savepath, observations)
+        self.renderer.composite(
+            savepath,
+            observations,
+            conditions=conds
+        )
 
     def render_samples(self, batch_size=2, n_samples=2):
-        '''
-            renders samples from (ema) diffusion model
-        '''
+        """
+        renders samples from (ema) diffusion model, marking start/end
+        """
+        rewards = []
         for i in range(batch_size):
-
-            ## get a single datapoint
             batch = self.dataloader_vis.__next__()
-            conditions = to_device(batch.conditions, 'cuda:0')
-
-            ## repeat each item in conditions `n_samples` times
-            conditions = apply_dict(
-                einops.repeat,
-                conditions,
-                'b d -> (repeat b) d', repeat=n_samples,
-            )
-
-            ## [ n_samples x horizon x (action_dim + observation_dim) ]
-            samples = self.ema_model.conditional_sample(conditions)
+            # sample trajectories as before
+            conds_t = to_device(batch.conditions, 'cuda:0')
+            conds_t = apply_dict(einops.repeat, conds_t,
+                                 'b d -> (repeat b) d', repeat=n_samples)
+            samples = self.ema_model.conditional_sample(conds_t)
             samples = to_np(samples)
 
-            ## [ n_samples x horizon x observation_dim ]
-            normed_observations = samples[:, :, self.dataset.action_dim:]
+            # build observation tracks [n_samples x (H+1) x obs_dim]
+            H = samples.shape[1]
+            obs_dim = self.dataset.action_dim
+            normed_obs = samples[:, :, obs_dim:]
+            start = to_np(batch.conditions[0])[None]              # [1 x obs_dim]
+            normed_obs = np.concatenate([np.repeat(start, n_samples, 0),
+                                          normed_obs], axis=1)
+            observations = self.dataset.normalizer.unnormalize(
+                normed_obs, 'observations'
+            )
 
-            # [ 1 x 1 x observation_dim ]
-            normed_conditions = to_np(batch.conditions[0])[:,None]
+            # --- NEW: derive start/end from the _same_ observations array ---
+            # pick out x,y (first two dims)
+            starts = observations[:, 0, :2]   # [n_samples x 2]
+            ends   = observations[:, -1, :2]  # [n_samples x 2]
+            conds = []
+            for s, e in zip(starts, ends):
+                conds.append({
+                    0:   s,
+                    H-1: e
+                })
 
-            # from diffusion.datasets.preprocessing import blocks_cumsum_quat
-            # observations = conditions + blocks_cumsum_quat(deltas)
-            # observations = conditions + deltas.cumsum(axis=1)
+            savepath = os.path.join(
+                self.logdir, f'sample-{self.step}-{i}.png'
+            )
+            self.renderer.composite(
+                savepath,
+                observations,
+                conditions=conds
+            )
 
-            ## [ n_samples x (horizon + 1) x observation_dim ]
-            normed_observations = np.concatenate([
-                np.repeat(normed_conditions, n_samples, axis=0),
-                normed_observations
-            ], axis=1)
+            rewards.append(self._mean_reward(samples))
 
-            ## [ n_samples x (horizon + 1) x observation_dim ]
-            observations = self.dataset.normalizer.unnormalize(normed_observations, 'observations')
+        return sum(rewards) / len(rewards)
 
-            #### @TODO: remove block-stacking specific stuff
-            # from diffusion.datasets.preprocessing import blocks_euler_to_quat, blocks_add_kuka
-            # observations = blocks_add_kuka(observations)
-            ####
+    
+    def _mean_reward(self, samples):
+        """
+        Vectorized rollout of `samples` through B envs in parallel.
+        """
+        B, H, _ = samples.shape                                  # [B x H x T]
+        fns = [lambda name=self.env.name: load_environment(name) for _ in range(B)]
+        envs = SyncVectorEnv(fns)
+        obs = envs.reset()                                       # [B x obs_dim]
+        tot = np.zeros(B)                                        # [B]
+        for t in range(H):
+            acts = samples[:, t, :self.dataset.action_dim]       # [B x A]
+            obs, r, _, _ = envs.step(acts)                       # obs: [B x obs_dim], r: [B]
+            tot += r
+        res = [
+            e.get_normalized_score(v) if hasattr(e, "get_normalized_score") else v
+            for e, v in zip(envs.envs, tot)
+        ]                                                       # [B]
+        envs.close()
+        return sum(res) / B
 
-            savepath = os.path.join(self.logdir, f'sample-{self.step}-{i}.png')
-            self.renderer.composite(savepath, observations)
+    def evaluate_batch_score(self, B=128, ncol=4):
+        """
+        Vectorized rollout with detailed prints.
+        """
+        from diffuser.guides.policies import Policy
+        
+        fns  = [lambda name=self.env.name: load_environment(name) for _ in range(B)]
+        envs = SyncVectorEnv(fns)
+        obs0 = envs.reset()
+        # set targets
+        tg = [ (e.set_target() or e._target) if hasattr(e,'set_target') else e._target
+               for e in envs.envs ]
+        tg = np.stack(tg)
+        cond = {
+            0: obs0,
+            self.model.horizon - 1:
+                np.concatenate([tg, np.zeros((B,2))], axis=1)
+        }
+        _, traj = Policy(self.ema_model, self.dataset.normalizer)(
+                       cond, batch_size=B)
+        acts = traj.actions                         # [B x H x A]
+        paths = [[o] for o in obs0]                 # list of B lists
+        tot   = np.zeros(B)
+        for t in range(acts.shape[1]):
+            o, r, _, _ = envs.step(acts[:,t])       # o:[B x obs], r:[B]
+            tot += r
+            for i,x in enumerate(o): paths[i].append(x)
+        res = [ e.get_normalized_score(v) if hasattr(e,'get_normalized_score') else v
+                for e,v in zip(envs.envs, tot) ]
+        envs.close()
+        avg = sum(res) / B
+        print(f'[ eval ] avg normalized score over {B}: {avg:.4f}')
+
+        arr = np.array([np.array(p) for p in paths])            # [B x (H+1) x obs]
+        conds = [{k: cond[k][i] for k in cond} for i in range(B)]
+        self.renderer.composite(
+            os.path.join(self.logdir, f'eval-rollouts-{self.step}.png'),
+            arr,
+            ncol=(ncol if B % ncol == 0 else B),
+            conditions=conds
+        )

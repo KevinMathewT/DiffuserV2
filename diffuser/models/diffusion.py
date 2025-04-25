@@ -15,6 +15,7 @@ class GaussianDiffusion(nn.Module):
     def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000,
         loss_type='l1', clip_denoised=False, predict_epsilon=True,
         action_weight=1.0, loss_discount=1.0, loss_weights=None,
+        parameterization: str = 'eps', v_posterior: float = 0.0,
     ):
         super().__init__()
         self.horizon = horizon
@@ -30,7 +31,8 @@ class GaussianDiffusion(nn.Module):
 
         self.n_timesteps = int(n_timesteps)
         self.clip_denoised = clip_denoised
-        self.predict_epsilon = predict_epsilon
+        self.parameterization = parameterization
+        self.predict_epsilon = (parameterization == 'eps')
 
         self.register_buffer('betas', betas)
         self.register_buffer('alphas_cumprod', alphas_cumprod)
@@ -44,7 +46,10 @@ class GaussianDiffusion(nn.Module):
         self.register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1))
 
         # calculations for posterior q(x_{t-1} | x_t, x_0)
-        posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+        posterior_variance = (
+            (1 - v_posterior) * betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
+            + v_posterior * betas
+        )
         self.register_buffer('posterior_variance', posterior_variance)
 
         ## log calculation clipped because the posterior variance
@@ -55,6 +60,14 @@ class GaussianDiffusion(nn.Module):
             betas * np.sqrt(alphas_cumprod_prev) / (1. - alphas_cumprod))
         self.register_buffer('posterior_mean_coef2',
             (1. - alphas_cumprod_prev) * np.sqrt(alphas) / (1. - alphas_cumprod))
+
+        # weights for variational lower bound term
+        if self.parameterization == 'v':
+            lvlb = torch.ones_like(betas**2)
+        else:
+            lvlb = betas**2 / (2 * posterior_variance * (1. - alphas_cumprod) * alphas)
+        lvlb[0] = lvlb[1]
+        self.register_buffer('lvlb_weights', lvlb, persistent=False)
 
         ## get loss coefficients and initialize objective
         loss_weights = self.get_loss_weights(action_weight, loss_discount, loss_weights)
@@ -104,6 +117,24 @@ class GaussianDiffusion(nn.Module):
         else:
             return noise
 
+    def predict_start_from_z_and_v(self, x_t, t, v):
+        return (
+            extract(self.sqrt_alphas_cumprod, t, x_t.shape) * x_t -
+            extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * v
+        )
+
+    def predict_eps_from_z_and_v(self, x_t, t, v):
+        return (
+            extract(self.sqrt_alphas_cumprod, t, x_t.shape) * v +
+            extract(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape) * x_t
+        )
+
+    def get_v(self, x_start, noise, t):
+        return (
+            extract(self.sqrt_alphas_cumprod, t, x_start.shape) * noise -
+            extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * x_start
+        )
+
     def q_posterior(self, x_start, x_t, t):
         posterior_mean = (
             extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
@@ -114,7 +145,11 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(self, x, cond, t):
-        x_recon = self.predict_start_from_noise(x, t=t, noise=self.model(x, cond, t))
+        out = self.model(x, cond, t)
+        if self.parameterization == 'v':
+            x_recon = self.predict_start_from_z_and_v(x, t, out)
+        else:
+            x_recon = self.predict_start_from_noise(x, t=t, noise=out)
 
         if self.clip_denoised:
             x_recon.clamp_(-1., 1.)
@@ -197,10 +232,17 @@ class GaussianDiffusion(nn.Module):
 
         assert noise.shape == x_recon.shape
 
-        if self.predict_epsilon:
-            loss, info = self.loss_fn(x_recon, noise)
+        if self.parameterization == 'eps':
+            target = noise
+        elif self.parameterization == 'x0':
+            target = x_start
         else:
-            loss, info = self.loss_fn(x_recon, x_start)
+            target = self.get_v(x_start, noise, t)
+
+        loss, info = self.loss_fn(x_recon, target)
+        vlb = (self.lvlb_weights[t] * info.get('per_sample_loss', loss)).mean()
+        info['vlb'] = vlb
+        loss = loss + vlb
 
         return loss, info
 
@@ -211,4 +253,3 @@ class GaussianDiffusion(nn.Module):
 
     def forward(self, cond, *args, **kwargs):
         return self.conditional_sample(cond=cond, *args, **kwargs)
-

@@ -1,5 +1,7 @@
 import diffuser.utils as utils
+import diffuser.datasets as datasets
 import pdb
+from time import time
 
 
 #-----------------------------------------------------------------------------#
@@ -65,6 +67,8 @@ diffusion_config = utils.Config(
     loss_type=args.loss_type,
     clip_denoised=args.clip_denoised,
     predict_epsilon=args.predict_epsilon,
+    parameterization=args.parameterization,    # added
+    v_posterior=args.v_posterior,              # added
     ## loss weighting
     action_weight=args.action_weight,
     loss_weights=args.loss_weights,
@@ -87,6 +91,8 @@ trainer_config = utils.Config(
     bucket=args.bucket,
     n_reference=args.n_reference,
     n_samples=args.n_samples,
+    n_train_steps=args.n_train_steps,
+    warmup_steps=int(0.1 * args.n_train_steps),
 )
 
 #-----------------------------------------------------------------------------#
@@ -98,6 +104,7 @@ model = model_config()
 diffusion = diffusion_config(model)
 
 trainer = trainer_config(diffusion, dataset, renderer)
+trainer.env = datasets.load_environment(args.dataset) # attach env so Trainer.evaluate_batch_score can use it
 
 
 #-----------------------------------------------------------------------------#
@@ -119,7 +126,9 @@ print('✓')
 
 n_epochs = int(args.n_train_steps // args.n_steps_per_epoch)
 
+start = time()
 for i in range(n_epochs):
     print(f'Epoch {i} / {n_epochs} | {args.savepath}')
     trainer.train(n_train_steps=args.n_steps_per_epoch)
+    print(f'Epoch {i} | epoch time: {time() - start:.2f}s')
 

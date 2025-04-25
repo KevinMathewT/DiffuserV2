@@ -65,7 +65,7 @@ chmod +x ${CONDA_PREFIX}/etc/conda/activate.d/env_vars.sh
 
 # Step 5: Verify the installation
 echo -e "${GREEN}Verifying MuJoCo-py installation...${NC}"
-python -c "import mujoco_py; print('MuJoCo-py successfully imported!')"
+python -c "import mujoco_py; print('MuJoCo-py successfully imported')"
 
 echo -e "${GREEN}Setup complete! You can now run:${NC}"
 echo -e "${YELLOW}python -m scripts.train --config config.maze2d --dataset maze2d-large-v1${NC}"

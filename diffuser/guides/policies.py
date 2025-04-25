@@ -23,18 +23,31 @@ class Policy:
         return parameters[0].device
 
     def _format_conditions(self, conditions, batch_size):
+        # normalize & to-torch
         conditions = utils.apply_dict(
             self.normalizer.normalize,
             conditions,
             'observations',
         )
-        conditions = utils.to_torch(conditions, dtype=torch.float32, device='cuda:0')
-        conditions = utils.apply_dict(
-            einops.repeat,
-            conditions,
-            'd -> repeat d', repeat=batch_size,
+        conditions = utils.to_torch(
+            conditions, dtype=torch.float32, device=self.device
         )
-        return conditions
+        # batch or repeat
+        new_conds = {}
+        for k, v in conditions.items():
+            if v.ndim == 1:
+                # single vector → repeat
+                new_conds[k] = einops.repeat(
+                    v, 'd -> repeat d', repeat=batch_size
+                )
+            elif v.ndim == 2 and v.shape[0] == batch_size:
+                # already batched
+                new_conds[k] = v
+            else:
+                raise ValueError(
+                    f"Condition {k} has invalid tensor shape {v.shape}"
+                )
+        return new_conds
 
     def __call__(self, conditions, debug=False, batch_size=1):
 
