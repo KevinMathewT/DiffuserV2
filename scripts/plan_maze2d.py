@@ -38,6 +38,8 @@ policy = Policy(diffusion, dataset.normalizer)
 
 observation = env.reset()
 
+print(f"conditional: {args.conditional}")
+
 if args.conditional:
     print('Resetting target')
     env.set_target()
