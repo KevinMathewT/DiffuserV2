@@ -23,16 +23,13 @@ class Policy:
         return parameters[0].device
 
     def _format_conditions(self, conditions, batch_size):
-        # normalize & to-torch
         conditions = utils.apply_dict(
             self.normalizer.normalize,
             conditions,
             'observations',
         )
-        conditions = utils.to_torch(
-            conditions, dtype=torch.float32, device=self.device
-        )
-        # batch or repeat
+        conditions = utils.to_torch(conditions, dtype=torch.float32, device=self.device)
+        
         new_conds = {}
         for k, v in conditions.items():
             if v.ndim == 1:

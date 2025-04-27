@@ -1,70 +1,163 @@
-# execute: python -m scripts.eval_maze2d   --dataset maze2d-umaze-v1   --logbase /home/km6748/DiffuserV2/pretrained/logs   --diffusion_loadpath diffusion/H128_T64   --diffusion_epoch 1760000   --batch_size 128   --vis_freq 10   --conditional True
-
-import json, numpy as np
+import json
+import numpy as np
 from os.path import join
+import pdb
+import gym
+from gym.vector import VectorEnv
 from diffuser.guides.policies import Policy
-import diffuser.datasets as ds
-import diffuser.utils as ut
+import diffuser.datasets as datasets
+import diffuser.utils as utils
 
-class Parser(ut.Parser):
+
+class Parser(utils.Parser):
     dataset: str = 'maze2d-umaze-v1'
     config: str = 'config.maze2d'
 
+# custom VectorEnv wrapper for Maze2D
+class MazeVectorEnv(VectorEnv):
+    def __init__(self, num_envs, dataset):
+        self.num_envs = num_envs
+        self.envs = [datasets.load_environment(dataset) for _ in range(num_envs)]
+        obs_space = self.envs[0].observation_space
+        act_space = self.envs[0].action_space
+        super().__init__(num_envs, obs_space, act_space)
+    def reset(self):
+        states = [e.reset() for e in self.envs]
+        return np.stack(states)
+    def step(self, actions):
+        results = [self.envs[i].step(actions[i]) for i in range(self.num_envs)]
+        obs, rew, term, info = zip(*results)
+        return np.stack(obs), np.array(rew), np.array(term), list(info)
+    def state_vector(self):
+        return np.stack([e.state_vector() for e in self.envs])
+    def get_normalized_score(self, totals):
+        return np.array([self.envs[i].get_normalized_score(totals[i]) for i in range(self.num_envs)])
+    @property
+    def unwrapped(self):
+        return self.envs
+
+#---------------------------------- setup ----------------------------------#
+
+NUM_ENVS = 8
 args = Parser().parse_args('plan')
-N=512  # parallel envs
-USE_MODEL_ACTION=True  # toggle between model actions vs waypoint-following
 
-exp=ut.load_diffusion(args.logbase,args.dataset,args.diffusion_loadpath,epoch=args.diffusion_epoch)
-ema,dset,rnd=exp.ema,exp.dataset,exp.renderer
-pol=Policy(ema,dset.normalizer)
-H=ema.horizon
+# logger = utils.Logger(args)
 
-es=[ds.load_environment(args.dataset) for _ in range(N)]
-obs=[e.reset() for e in es]
+env = MazeVectorEnv(NUM_ENVS, args.dataset)
+
+print(" ---- Args ---- ")
+print(args)
+print(" -------------- ")
+
+#---------------------------------- loading ----------------------------------#
+
+diffusion_experiment = utils.load_diffusion(
+    args.logbase, args.dataset, args.diffusion_loadpath, epoch=args.diffusion_epoch
+)
+
+diffusion = diffusion_experiment.ema
+dataset = diffusion_experiment.dataset
+renderer = diffusion_experiment.renderer
+
+policy = Policy(diffusion, dataset.normalizer)
+
+#---------------------------------- main loop ----------------------------------#
+
+observation = env.reset()
+
 if args.conditional:
-    for e in es:e.set_target()
+    print('Resetting target')
+    for e in env.envs:
+        e.set_target()
 
-actions=[None]*N
-seqs=[None]*N
-for i,e in enumerate(es):
-    trg=[*e._target,0,0]
-    cd={H-1:np.array(trg),0:obs[i]}
-    _,smp=pol(cd,batch_size=args.batch_size)
-    actions[i]=smp.actions[0]      # [H, act_dim]
-    seqs[i]=smp.observations[0]    # [H, obs_dim]
+# set conditioning xy position to be the goal
+targets = np.stack([e.unwrapped._target for e in env.envs])
+cond = {
+    diffusion.horizon - 1: np.hstack([targets, np.zeros((NUM_ENVS, 2))]),
+}
 
-rol=[[o.copy()] for o in obs]
-ret=np.zeros(N)
-sc=np.zeros(N)
-done=np.zeros(N,bool)
+# observations for rendering
+rollout = [observation.copy()]
 
-for t in range(es[0].max_episode_steps):
-    rs=[]
-    for i,e in enumerate(es):
-        if done[i]:
-            rs.append(0);continue
-        state=e.state_vector().copy()
-        if USE_MODEL_ACTION:
-            a=actions[i][t] if t<len(actions[i]) else np.zeros(e.action_space.shape)
-        else:
-            if t<len(seqs[i])-1:
-                wp=seqs[i][t+1]
-            else:
-                wp=seqs[i][-1].copy();wp[2:]=0
-            a=wp[:2]-state[:2]+(wp[2:]-state[2:])
-        o2,r,term,_=e.step(a)
-        ret[i]+=r
-        sc[i]=e.get_normalized_score(ret[i])
-        rol[i].append(o2.copy())
-        obs[i]=o2
-        if term:done[i]=True
-        rs.append(r)
-    print(f't:{t} | r_avg:{np.mean(rs):.2f} | R_avg:{ret.mean():.2f} | score_avg:{sc.mean():.4f}')
-    if t%args.vis_freq==0:
-        rnd.composite(join(args.savepath,f'{t}.png'),np.array(rol[0])[None],ncol=1)
-        rnd.composite(join(args.savepath,'rollout.png'),np.array(rol[0])[None],ncol=1)
-    if done.all():break
+total_reward = np.zeros(NUM_ENVS)
+for t in range(env.envs[0].max_episode_steps):
 
-print(f'FINAL | steps:{t} | R_avg:{ret.mean():.2f} | score_avg:{sc.mean():.4f}')
+    state = env.state_vector().copy()
 
-json.dump({'score_avg':float(sc.mean()),'return_avg':float(ret.mean()),'step':int(t),'term':bool(done.all()),'epoch_diffusion':exp.epoch},open(join(args.savepath,'rollout.json'),'w'),indent=2,sort_keys=True)
+    # can replan if desired, but the open-loop plans are good enough for maze2d
+    # that we really only need to plan once
+    if t == 0:
+        cond[0] = observation
+
+        action, samples = policy(cond, batch_size=NUM_ENVS)
+        actions = samples.actions
+        sequence = samples.observations
+    # pdb.set_trace()
+
+    # ####
+    if t < sequence.shape[1] - 1:
+        next_waypoint = sequence[:, t+1]
+    else:
+        next_waypoint = sequence[:, -1].copy()
+        next_waypoint[:, 2:] = 0
+        # pdb.set_trace()
+
+    # can use actions or define a simple controller based on state predictions
+    action = (next_waypoint[:, :2] - state[:, :2]) + (next_waypoint[:, 2:] - state[:, 2:])
+    # pdb.set_trace()
+    ####
+
+    next_observation, reward, terminal, _ = env.step(action)
+    total_reward += reward
+    score = env.get_normalized_score(total_reward)
+    for i in range(NUM_ENVS):
+        if t == len(sequence) - 1:
+            print(
+                f'env {i} t: {t} | r: {reward[i]:.2f} |  R: {total_reward[i]:.2f} | '
+                f'score: {score[i]:.4f} | {action[i]}'
+            )
+
+            if 'maze2d' in args.dataset:
+                xy = next_observation[i, :2]
+                goal = env.envs[i].unwrapped._target
+                print(f'env {i} maze | pos: {xy} | goal: {goal}')
+
+    # update rollout observations
+    rollout.append(next_observation.copy())
+
+    # logger.log(score=score, step=t)
+
+    if t % args.vis_freq == 0 or terminal.any():
+        fullpath = join(args.savepath, f'{t}.png')
+
+        if t == 0:
+            renderer.composite(fullpath, samples.observations, ncol=1)
+
+        # renderer.render_plan(join(args.savepath, f'{t}_plan.mp4'), samples.actions, samples.observations, state)
+
+        # save rollout thus far
+        renderer.composite(join(args.savepath, 'rollout.png'),
+                           np.array(rollout)[None], ncol=1)
+
+        # renderer.render_rollout(join(args.savepath, f'rollout.mp4'), rollout, fps=80)
+
+        # logger.video(rollout=join(args.savepath, f'rollout.mp4'),
+        #              plan=join(args.savepath, f'{t}_plan.mp4'), step=t)
+
+    if terminal.any():
+        break
+
+    observation = next_observation
+
+# logger.finish(t, env.envs[0].max_episode_steps, score=score, value=0)
+
+# save result as a json file
+json_path = join(args.savepath, 'rollout.json')
+json_data = {
+    'score': score.tolist(),
+    'step': int(t),
+    'return': total_reward.tolist(),
+    'term': terminal.tolist(),
+    'epoch_diffusion': diffusion_experiment.epoch
+}
+json.dump(json_data, open(json_path, 'w'), indent=2, sort_keys=True)

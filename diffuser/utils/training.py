@@ -234,53 +234,52 @@ class Trainer(object):
         )
 
     def render_samples(self, batch_size=2, n_samples=2):
-        """
-        renders samples from (ema) diffusion model, marking start/end
-        """
-        rewards = []
+        '''
+            renders samples from (ema) diffusion model
+        '''
         for i in range(batch_size):
+
+            ## get a single datapoint
             batch = self.dataloader_vis.__next__()
-            # sample trajectories as before
-            conds_t = to_device(batch.conditions, 'cuda:0')
-            conds_t = apply_dict(einops.repeat, conds_t,
-                                 'b d -> (repeat b) d', repeat=n_samples)
-            samples = self.ema_model.conditional_sample(conds_t)
+            conditions = to_device(batch.conditions, 'cuda:0')
+
+            ## repeat each item in conditions `n_samples` times
+            conditions = apply_dict(
+                einops.repeat,
+                conditions,
+                'b d -> (repeat b) d', repeat=n_samples,
+            )
+
+            ## [ n_samples x horizon x (action_dim + observation_dim) ]
+            samples = self.ema_model.conditional_sample(conditions)
             samples = to_np(samples)
 
-            # build observation tracks [n_samples x (H+1) x obs_dim]
-            H = samples.shape[1]
-            obs_dim = self.dataset.action_dim
-            normed_obs = samples[:, :, obs_dim:]
-            start = to_np(batch.conditions[0])[None]              # [1 x obs_dim]
-            normed_obs = np.concatenate([np.repeat(start, n_samples, 0),
-                                          normed_obs], axis=1)
-            observations = self.dataset.normalizer.unnormalize(
-                normed_obs, 'observations'
-            )
+            ## [ n_samples x horizon x observation_dim ]
+            normed_observations = samples[:, :, self.dataset.action_dim:]
 
-            # --- NEW: derive start/end from the _same_ observations array ---
-            # pick out x,y (first two dims)
-            starts = observations[:, 0, :2]   # [n_samples x 2]
-            ends   = observations[:, -1, :2]  # [n_samples x 2]
-            conds = []
-            for s, e in zip(starts, ends):
-                conds.append({
-                    0:   s,
-                    H-1: e
-                })
+            # [ 1 x 1 x observation_dim ]
+            normed_conditions = to_np(batch.conditions[0])[:,None]
 
-            savepath = os.path.join(
-                self.logdir, f'sample-{self.step}-{i}.png'
-            )
-            self.renderer.composite(
-                savepath,
-                observations,
-                conditions=conds
-            )
+            # from diffusion.datasets.preprocessing import blocks_cumsum_quat
+            # observations = conditions + blocks_cumsum_quat(deltas)
+            # observations = conditions + deltas.cumsum(axis=1)
 
-            rewards.append(self._mean_reward(samples))
+            ## [ n_samples x (horizon + 1) x observation_dim ]
+            normed_observations = np.concatenate([
+                np.repeat(normed_conditions, n_samples, axis=0),
+                normed_observations
+            ], axis=1)
 
-        return sum(rewards) / len(rewards)
+            ## [ n_samples x (horizon + 1) x observation_dim ]
+            observations = self.dataset.normalizer.unnormalize(normed_observations, 'observations')
+
+            #### @TODO: remove block-stacking specific stuff
+            # from diffusion.datasets.preprocessing import blocks_euler_to_quat, blocks_add_kuka
+            # observations = blocks_add_kuka(observations)
+            ####
+
+            savepath = os.path.join(self.logdir, f'sample-{self.step}-{i}.png')
+            self.renderer.composite(savepath, observations)
 
     
     def _mean_reward(self, samples):
@@ -308,39 +307,108 @@ class Trainer(object):
         Vectorized rollout with detailed prints.
         """
         from diffuser.guides.policies import Policy
+        # from diffuser.utils.serialization import load_diffusion
+        import diffuser.datasets as datasets
         
-        fns  = [lambda name=self.env.name: load_environment(name) for _ in range(B)]
-        envs = SyncVectorEnv(fns)
-        obs0 = envs.reset()
-        # set targets
-        tg = [ (e.set_target() or e._target) if hasattr(e,'set_target') else e._target
-               for e in envs.envs ]
-        tg = np.stack(tg)
-        cond = {
-            0: obs0,
-            self.model.horizon - 1:
-                np.concatenate([tg, np.zeros((B,2))], axis=1)
-        }
-        _, traj = Policy(self.ema_model, self.dataset.normalizer)(
-                       cond, batch_size=B)
-        acts = traj.actions                         # [B x H x A]
-        paths = [[o] for o in obs0]                 # list of B lists
-        tot   = np.zeros(B)
-        for t in range(acts.shape[1]):
-            o, r, _, _ = envs.step(acts[:,t])       # o:[B x obs], r:[B]
-            tot += r
-            for i,x in enumerate(o): paths[i].append(x)
-        res = [ e.get_normalized_score(v) if hasattr(e,'get_normalized_score') else v
-                for e,v in zip(envs.envs, tot) ]
-        envs.close()
-        avg = sum(res) / B
-        print(f'[ eval ] avg normalized score over {B}: {avg:.4f}')
+        # diffusion_experiment = load_diffusion("", "", self.logdir)
 
-        arr = np.array([np.array(p) for p in paths])            # [B x (H+1) x obs]
-        conds = [{k: cond[k][i] for k in cond} for i in range(B)]
-        self.renderer.composite(
-            os.path.join(self.logdir, f'eval-rollouts-{self.step}.png'),
-            arr,
-            ncol=(ncol if B % ncol == 0 else B),
-            conditions=conds
-        )
+        diffusion = self.ema_model
+        dataset = self.dataset
+        renderer = self.renderer
+
+        policy = Policy(diffusion, self.dataset.normalizer)
+        env = datasets.load_environment(self.dataset_name)
+
+        #---------------------------------- main loop ----------------------------------#
+
+        observation = env.reset()
+
+        ## set conditioning xy position to be the goal
+        target = env._target
+        cond = {
+            diffusion.horizon - 1: np.array([*target, 0, 0]),
+        }
+
+        ## observations for rendering
+        rollout = [observation.copy()]
+
+        total_reward = 0
+        for t in range(env.max_episode_steps):
+
+            state = env.state_vector().copy()
+
+            ## can replan if desired, but the open-loop plans are good enough for maze2d
+            ## that we really only need to plan once
+            if t == 0:
+                cond[0] = observation
+
+                action, samples = policy(cond, batch_size=1)
+                actions = samples.actions[0]
+                sequence = samples.observations[0]
+            # pdb.set_trace()
+
+            # ####
+            if t < len(sequence) - 1:
+                next_waypoint = sequence[t+1]
+            else:
+                next_waypoint = sequence[-1].copy()
+                next_waypoint[2:] = 0
+                # pdb.set_trace()
+
+            ## can use actions or define a simple controller based on state predictions
+            action = next_waypoint[:2] - state[:2] + (next_waypoint[2:] - state[2:])
+            # pdb.set_trace()
+            ####
+
+            # else:
+            #     actions = actions[1:]
+            #     if len(actions) > 1:
+            #         action = actions[0]
+            #     else:
+            #         # action = np.zeros(2)
+            #         action = -state[2:]
+            #         pdb.set_trace()
+
+
+
+            next_observation, reward, terminal, _ = env.step(action)
+            total_reward += reward
+            score = env.get_normalized_score(total_reward)
+            if t == len(sequence) - 1:
+                print(
+                    f't: {t} | r: {reward:.2f} |  R: {total_reward:.2f} | score: {score:.4f} | '
+                    f'{action}'
+                )
+
+            if 'maze2d' in self.dataset_name:
+                xy = next_observation[:2]
+                goal = env.unwrapped._target
+                if t == len(sequence) - 1:
+                    print(
+                        f'maze | pos: {xy} | goal: {goal}'
+                    )
+
+            ## update rollout observations
+            rollout.append(next_observation.copy())
+
+            # logger.log(score=score, step=t)
+
+            # if t % args.vis_freq == 0 or terminal:
+            #     fullpath = join(args.savepath, f'{t}.png')
+
+                # if t == 0: renderer.composite(fullpath, samples.observations, ncol=1)
+
+
+                # renderer.render_plan(join(args.savepath, f'{t}_plan.mp4'), samples.actions, samples.observations, state)
+
+                ## save rollout thus far
+                # renderer.composite(join(args.savepath, 'rollout.png'), np.array(rollout)[None], ncol=1)
+
+                # renderer.render_rollout(join(args.savepath, f'rollout.mp4'), rollout, fps=80)
+
+                # logger.video(rollout=join(args.savepath, f'rollout.mp4'), plan=join(args.savepath, f'{t}_plan.mp4'), step=t)
+
+            if terminal:
+                break
+
+            observation = next_observation

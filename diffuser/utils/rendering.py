@@ -334,19 +334,16 @@ class Maze2dRenderer(MazeRenderer):
         self.env_name = env
         self.env = load_environment(env)
         self.observation_dim = np.prod(self.env.observation_space.shape)
-        self.action_dim      = np.prod(self.env.action_space.shape)
-        self.goal            = None
-        self._background     = self.env.maze_arr == 10
+        self.action_dim = np.prod(self.env.action_space.shape)
+        self.goal = None
+        self._background = self.env.maze_arr == 10
         self._remove_margins = False
-        self._extent         = (0, 1, 1, 0)
+        self._extent = (0, 1, 1, 0)
 
     def renders(self, observations, conditions=None, **kwargs):
         bounds = MAZE_BOUNDS[self.env_name]
 
-        # shift into center of each cell
-        observations = observations + 0.5
-
-        # scale into [0,1]×[0,1]
+        observations = observations + .5
         if len(bounds) == 2:
             _, scale = bounds
             observations /= scale
@@ -368,8 +365,7 @@ class Maze2dRenderer(MazeRenderer):
                             arr[0] / iscale,
                             arr[1] / jscale
                         ])
-
-        # delegate the actual plotting to the parent class
+                        
         return super().renders(observations, conditions, **kwargs)
 
 

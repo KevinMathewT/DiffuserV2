@@ -13,7 +13,7 @@ from .helpers import (
 
 class GaussianDiffusion(nn.Module):
     def __init__(self, model, horizon, observation_dim, action_dim, n_timesteps=1000,
-        loss_type='l1', clip_denoised=False, predict_epsilon=True,
+        loss_type='l1', clip_denoised=False, predict_epsilon=None,
         action_weight=1.0, loss_discount=1.0, loss_weights=None,
         parameterization: str = 'eps', v_posterior: float = 0.0,
     ):
@@ -32,7 +32,12 @@ class GaussianDiffusion(nn.Module):
         self.n_timesteps = int(n_timesteps)
         self.clip_denoised = clip_denoised
         self.parameterization = parameterization
-        self.predict_epsilon = (parameterization == 'eps')
+        
+        if predict_epsilon is not None:
+            if predict_epsilon:
+                self.parameterization = 'eps'
+            else:
+                self.parameterization = 'x0'
 
         self.register_buffer('betas', betas)
         self.register_buffer('alphas_cumprod', alphas_cumprod)
@@ -109,7 +114,7 @@ class GaussianDiffusion(nn.Module):
             if self.predict_epsilon, model output is (scaled) noise;
             otherwise, model predicts x0 directly
         '''
-        if self.predict_epsilon:
+        if self.parameterization == 'eps':
             return (
                 extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t -
                 extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise

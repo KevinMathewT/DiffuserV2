@@ -66,7 +66,7 @@ diffusion_config = utils.Config(
     n_timesteps=args.n_diffusion_steps,
     loss_type=args.loss_type,
     clip_denoised=args.clip_denoised,
-    predict_epsilon=args.predict_epsilon,
+    # predict_epsilon=args.predict_epsilon,
     parameterization=args.parameterization,    # added
     v_posterior=args.v_posterior,              # added
     ## loss weighting
@@ -105,6 +105,7 @@ diffusion = diffusion_config(model)
 
 trainer = trainer_config(diffusion, dataset, renderer)
 trainer.env = datasets.load_environment(args.dataset) # attach env so Trainer.evaluate_batch_score can use it
+trainer.dataset_name = args.dataset
 
 
 #-----------------------------------------------------------------------------#

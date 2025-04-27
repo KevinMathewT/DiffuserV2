@@ -44,7 +44,6 @@ base = {
         'action_weight': 1,
         'loss_weights': None,
         'loss_discount': 1,
-        'predict_epsilon': False,
         'dim_mults': (1, 4, 8),
         'renderer': 'utils.Maze2dRenderer',
 
@@ -63,20 +62,24 @@ base = {
         'exp_name': watch(diffusion_args_to_watch),
 
         ## training
-        'n_steps_per_epoch': 1000,
+        'n_steps_per_epoch': 10000,
         'loss_type': 'l2',
         # 'n_train_steps': 2e6,              # ################ #
         # 'batch_size': 32,                  #  original params #
         # 'learning_rate': 2e-4,             #                  #
         # 'gradient_accumulate_every': 2,    # ################ #
+        'n_train_steps': 2e6,          
+        'batch_size': 64,              
+        'learning_rate': 2e-4,         
+        'gradient_accumulate_every': 1,
         # 'n_train_steps': 500000, # /4
         # 'batch_size': 256, # 8× 
         # 'learning_rate': 8e-4, # 4×
         # 'gradient_accumulate_every': 1, # /2
-        'n_train_steps': 250000, # /8
-        'batch_size': 512, # 16× 
-        'learning_rate': 1.6e-3, # 8×
-        'gradient_accumulate_every': 1, # /2
+        # 'n_train_steps': 250000, # /8
+        # 'batch_size': 512, # 16× 
+        # 'learning_rate': 1.6e-3, # 8×
+        # 'gradient_accumulate_every': 1, # /2
         # 'n_train_steps': 125000, # /8
         # 'batch_size': 1024, # 32× 
         # 'learning_rate': 1.6e-3, # 8× (technically 16×)
