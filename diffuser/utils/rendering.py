@@ -276,6 +276,8 @@ MAZE_BOUNDS = {
     'maze2d-large-v1': (0, 9, 0, 12)
 }
 
+SCALE = 2.0          # 1 → current 500×500; 2 → 1000×1000; 2.25 → 1125×1125 …
+
 class MazeRenderer:
 
     def __init__(self, env):
@@ -285,25 +287,39 @@ class MazeRenderer:
         self._remove_margins = False
         self._extent = (0, 1, 1, 0)
 
-    def renders(self, observations, conditions=None, title=None):
+    def renders(self, observations, conditions=None, title=None, label=None):   # ← NEW arg
         plt.clf()
         fig = plt.gcf()
-        fig.set_size_inches(5, 5)
+        fig.set_size_inches(5 * SCALE, 5 * SCALE)
+        fig.set_dpi(100 * SCALE)
         plt.imshow(self._background * .5,
-            extent=self._extent, cmap=plt.cm.binary, vmin=0, vmax=1)
+                   extent=self._extent, cmap=plt.cm.binary, vmin=0, vmax=1)
 
         path_length = len(observations)
-        colors = plt.cm.jet(np.linspace(0,1,path_length))
-        plt.plot(observations[:,1], observations[:,0], c='black', zorder=10)
-        plt.scatter(observations[:,1], observations[:,0], c=colors, zorder=20)
+        colors = plt.cm.jet(np.linspace(0, 1, path_length))
+        plt.scatter(observations[:, 1], observations[:, 0], c=colors, zorder=20)
 
-        # --- START MINIMAL ADDITION ---
+        # --- existing +/– markers ---
         if conditions is not None and isinstance(conditions, dict):
-            if 0 in conditions: plt.scatter(conditions[0][1], conditions[0][0], marker='+', c='white', s=150, zorder=30) # Plot white '+' start marker
-            end_keys = [k for k in conditions if k != 0] # Find potential end keys
-            if end_keys: plt.scatter(conditions[max(end_keys)][1], conditions[max(end_keys)][0], marker='+', c='black', s=150, zorder=30) # Plot black '+' end marker
-        # --- END MINIMAL ADDITION ---
-        
+            if 0 in conditions:
+                plt.scatter(conditions[0][1], conditions[0][0],
+                            marker='+', c='white', s=150, zorder=30)
+            end_keys = [k for k in conditions if k != 0]
+            if end_keys:
+                plt.scatter(conditions[max(end_keys)][1], conditions[max(end_keys)][0],
+                            marker='+', c='black', s=150, zorder=30)
+
+        # ---------- NEW ----------
+        if label is not None:
+            ax = plt.gca()
+            ax.text(0.02, 0.02, label,
+                    transform=ax.transAxes,
+                    fontsize=fig.get_figheight()*4,  # scale with image size
+                    color='white',
+                    ha='left', va='bottom',
+                    bbox=dict(facecolor='black', alpha=0.6, pad=2))
+        # --------------------------
+
         plt.axis('off')
         plt.title(title)
         img = plot2img(fig, remove_margins=self._remove_margins)

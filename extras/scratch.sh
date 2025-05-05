@@ -1,0 +1,2 @@
+python -m scripts.train --config config.maze2d --dataset maze2d-umaze-v1 --loadpath pretrained/logs/maze2d-umaze-v1/diffusion/H128_T64
+python -m scripts.train --config config.maze2d --dataset maze2d-large-v1 --loadpath pretrained/logs/maze2d-umaze-v1/diffusion/H128_T64

@@ -97,7 +97,8 @@ class Trainer(object):
             progress = float(step - warmup_steps) / float(max(1, n_train_steps - warmup_steps))
             return 0.5 * (1.0 + math.cos(math.pi * progress))
 
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+        # self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+        self.scheduler = None
 
         self.logdir = results_folder
         self.bucket = bucket
@@ -120,7 +121,7 @@ class Trainer(object):
     #------------------------------------ api ------------------------------------#
     #-----------------------------------------------------------------------------#
 
-    def train(self, n_train_steps):
+    def train(self, epoch, n_train_steps):
 
         timer = Timer()
         for step in range(n_train_steps):
@@ -133,15 +134,15 @@ class Trainer(object):
                 loss.backward()
 
             self.optimizer.step()
-            self.scheduler.step()   
+            if self.scheduler is not None:
+                self.scheduler.step()   
             self.optimizer.zero_grad()
 
             if self.step % self.update_ema_every == 0:
                 self.step_ema()
 
             if self.step % self.save_freq == 0:
-                label = self.step // self.label_freq * self.label_freq
-                self.save(label)
+                self.save(epoch, step)
 
             if self.step % self.log_freq == 0:
                 lr = self.optimizer.param_groups[0]['lr']
@@ -158,7 +159,7 @@ class Trainer(object):
 
             self.step += 1
 
-    def save(self, epoch):
+    def save(self, epoch, step):
         '''
             saves model and ema to disk;
             syncs to storage bucket if a bucket is specified
@@ -168,7 +169,7 @@ class Trainer(object):
             'model': self.model.state_dict(),
             'ema': self.ema_model.state_dict()
         }
-        savepath = os.path.join(self.logdir, f'state_{epoch}.pt')
+        savepath = os.path.join(self.logdir, f'state_{epoch}_{step}.pt')
         torch.save(data, savepath)
         print(f'[ utils/training ] Saved model to {savepath}')
         if self.bucket is not None:
@@ -302,7 +303,7 @@ class Trainer(object):
         envs.close()
         return sum(res) / B
 
-    def evaluate_batch_score(self, B=128, ncol=4):
+    def evaluate_batch_score(self, B=32):
         """
         Vectorized rollout with detailed prints.
         """
@@ -319,96 +320,104 @@ class Trainer(object):
         policy = Policy(diffusion, self.dataset.normalizer)
         env = datasets.load_environment(self.dataset_name)
 
+        total_batch_reward = 0
+        total_batch_score = 0
+
         #---------------------------------- main loop ----------------------------------#
+        for i in range(B):    
+            observation = env.reset()
 
-        observation = env.reset()
+            ## set conditioning xy position to be the goal
+            env.set_target()
+            target = env._target
+            cond = {
+                diffusion.horizon - 1: np.array([*target, 0, 0]),
+            }
 
-        ## set conditioning xy position to be the goal
-        target = env._target
-        cond = {
-            diffusion.horizon - 1: np.array([*target, 0, 0]),
-        }
+            ## observations for rendering
+            rollout = [observation.copy()]
 
-        ## observations for rendering
-        rollout = [observation.copy()]
+            total_reward = 0
+            for t in range(env.max_episode_steps):
 
-        total_reward = 0
-        for t in range(env.max_episode_steps):
+                state = env.state_vector().copy()
 
-            state = env.state_vector().copy()
+                ## can replan if desired, but the open-loop plans are good enough for maze2d
+                ## that we really only need to plan once
+                if t == 0:
+                    cond[0] = observation
 
-            ## can replan if desired, but the open-loop plans are good enough for maze2d
-            ## that we really only need to plan once
-            if t == 0:
-                cond[0] = observation
-
-                action, samples = policy(cond, batch_size=1)
-                actions = samples.actions[0]
-                sequence = samples.observations[0]
-            # pdb.set_trace()
-
-            # ####
-            if t < len(sequence) - 1:
-                next_waypoint = sequence[t+1]
-            else:
-                next_waypoint = sequence[-1].copy()
-                next_waypoint[2:] = 0
+                    action, samples = policy(cond, batch_size=1)
+                    actions = samples.actions[0]
+                    sequence = samples.observations[0]
                 # pdb.set_trace()
 
-            ## can use actions or define a simple controller based on state predictions
-            action = next_waypoint[:2] - state[:2] + (next_waypoint[2:] - state[2:])
-            # pdb.set_trace()
-            ####
+                # ####
+                if t < len(sequence) - 1:
+                    next_waypoint = sequence[t+1]
+                else:
+                    next_waypoint = sequence[-1].copy()
+                    next_waypoint[2:] = 0
+                    # pdb.set_trace()
 
-            # else:
-            #     actions = actions[1:]
-            #     if len(actions) > 1:
-            #         action = actions[0]
-            #     else:
-            #         # action = np.zeros(2)
-            #         action = -state[2:]
-            #         pdb.set_trace()
+                ## can use actions or define a simple controller based on state predictions
+                action = next_waypoint[:2] - state[:2] + (next_waypoint[2:] - state[2:])
+                # pdb.set_trace()
+                ####
+
+                # else:
+                #     actions = actions[1:]
+                #     if len(actions) > 1:
+                #         action = actions[0]
+                #     else:
+                #         # action = np.zeros(2)
+                #         action = -state[2:]
+                #         pdb.set_trace()
 
 
 
-            next_observation, reward, terminal, _ = env.step(action)
-            total_reward += reward
-            score = env.get_normalized_score(total_reward)
-            if t == len(sequence) - 1:
-                print(
-                    f't: {t} | r: {reward:.2f} |  R: {total_reward:.2f} | score: {score:.4f} | '
-                    f'{action}'
-                )
-
-            if 'maze2d' in self.dataset_name:
-                xy = next_observation[:2]
-                goal = env.unwrapped._target
-                if t == len(sequence) - 1:
+                next_observation, reward, terminal, _ = env.step(action)
+                total_reward += reward
+                score = env.get_normalized_score(total_reward)
+                if t == env.max_episode_steps - 1:
                     print(
-                        f'maze | pos: {xy} | goal: {goal}'
+                        f't: {t} | r: {reward:.2f} |  R: {total_reward:.2f} | score: {score:.4f} | '
+                        f'{action}'
                     )
+                    total_batch_reward += total_reward
+                    total_batch_score += score
 
-            ## update rollout observations
-            rollout.append(next_observation.copy())
+                if 'maze2d' in self.dataset_name:
+                    xy = next_observation[:2]
+                    goal = env.unwrapped._target
+                    if t == env.max_episode_steps - 1:
+                        print(
+                            f'maze | pos: {xy} | goal: {goal}'
+                        )
 
-            # logger.log(score=score, step=t)
+                ## update rollout observations
+                rollout.append(next_observation.copy())
 
-            # if t % args.vis_freq == 0 or terminal:
-            #     fullpath = join(args.savepath, f'{t}.png')
+                # logger.log(score=score, step=t)
 
-                # if t == 0: renderer.composite(fullpath, samples.observations, ncol=1)
+                # if t % args.vis_freq == 0 or terminal:
+                #     fullpath = join(args.savepath, f'{t}.png')
+
+                    # if t == 0: renderer.composite(fullpath, samples.observations, ncol=1)
 
 
-                # renderer.render_plan(join(args.savepath, f'{t}_plan.mp4'), samples.actions, samples.observations, state)
+                    # renderer.render_plan(join(args.savepath, f'{t}_plan.mp4'), samples.actions, samples.observations, state)
 
-                ## save rollout thus far
-                # renderer.composite(join(args.savepath, 'rollout.png'), np.array(rollout)[None], ncol=1)
+                    ## save rollout thus far
+                    # renderer.composite(join(args.savepath, 'rollout.png'), np.array(rollout)[None], ncol=1)
 
-                # renderer.render_rollout(join(args.savepath, f'rollout.mp4'), rollout, fps=80)
+                    # renderer.render_rollout(join(args.savepath, f'rollout.mp4'), rollout, fps=80)
 
-                # logger.video(rollout=join(args.savepath, f'rollout.mp4'), plan=join(args.savepath, f'{t}_plan.mp4'), step=t)
+                    # logger.video(rollout=join(args.savepath, f'rollout.mp4'), plan=join(args.savepath, f'{t}_plan.mp4'), step=t)
 
-            if terminal:
-                break
+                if terminal:
+                    break
 
-            observation = next_observation
+                observation = next_observation
+
+        print(f"Average batch reward: {total_batch_reward / B} | Average batch score: {total_batch_score / B}")

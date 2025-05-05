@@ -119,6 +119,7 @@ for t in range(env.max_episode_steps):
 
 
         # renderer.render_plan(join(args.savepath, f'{t}_plan.mp4'), samples.actions, samples.observations, state)
+        # print(f'video saved to {join(args.savepath, f"{t}_plan.mp4")}')
 
         ## save rollout thus far
         renderer.composite(join(args.savepath, 'rollout.png'), np.array(rollout)[None], ncol=1)

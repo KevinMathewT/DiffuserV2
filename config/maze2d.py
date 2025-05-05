@@ -11,6 +11,7 @@ now = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 diffusion_args_to_watch = [
     ('prefix', ''),
     ('horizon', 'H'),
+    ('n_diffusion_steps', 'n'),
     ('n_diffusion_steps', 'T'),
     ('parameterization', 'P'),            # added v-pred parameterization
     ('v_posterior', 'v'),                 # added v-pred posterior weight
@@ -38,9 +39,9 @@ base = {
         'model': 'models.TemporalUnet',
         'diffusion': 'models.GaussianDiffusion',
         'horizon': 256,
-        'n_diffusion_steps': 256,
-        'parameterization': 'eps',           # default parameterization
-        'v_posterior': 0.0,                 # default v-posterior weight
+        'n_diffusion_steps': 128, # original 256
+        'parameterization': 'v',           # default parameterization
+        'v_posterior': 0.5,                 # default v-posterior weight
         'action_weight': 1,
         'loss_weights': None,
         'loss_discount': 1,
@@ -64,26 +65,10 @@ base = {
         ## training
         'n_steps_per_epoch': 10000,
         'loss_type': 'l2',
-        # 'n_train_steps': 2e6,              # ################ #
-        # 'batch_size': 32,                  #  original params #
-        # 'learning_rate': 2e-4,             #                  #
-        # 'gradient_accumulate_every': 2,    # ################ #
-        'n_train_steps': 2e6,          
-        'batch_size': 64,              
-        'learning_rate': 2e-4,         
-        'gradient_accumulate_every': 1,
-        # 'n_train_steps': 500000, # /4
-        # 'batch_size': 256, # 8× 
-        # 'learning_rate': 8e-4, # 4×
-        # 'gradient_accumulate_every': 1, # /2
-        # 'n_train_steps': 250000, # /8
-        # 'batch_size': 512, # 16× 
-        # 'learning_rate': 1.6e-3, # 8×
-        # 'gradient_accumulate_every': 1, # /2
-        # 'n_train_steps': 125000, # /8
-        # 'batch_size': 1024, # 32× 
-        # 'learning_rate': 1.6e-3, # 8× (technically 16×)
-        # 'gradient_accumulate_every': 1, # /2
+        'n_train_steps': 50000, # original 2e6         
+        'batch_size': 32,              
+        'learning_rate': 5e-5, # original 2e-4     
+        'gradient_accumulate_every': 2,
         'ema_decay': 0.995,
         'save_freq': 1000,
         'sample_freq': 1000,
@@ -104,7 +89,7 @@ base = {
 
         ## diffusion model
         'horizon': 256,
-        'n_diffusion_steps': 256,
+        'n_diffusion_steps': 128, # original 256
         'normalizer': 'LimitsNormalizer',
 
         ## serialization
@@ -135,25 +120,49 @@ base = {
 maze2d_umaze_v1 = {
     'diffusion': {
         'horizon': 128,
-        'n_diffusion_steps': 64,
-        # 'parameterization': 'v',            # override to v-pred
-        # 'v_posterior': 0.5,                # example non-zero weight
+        'n_diffusion_steps': 32,
+        'parameterization': 'v',            # override to v-pred
+        'v_posterior': 0,                # example non-zero weight
+        # 'n_train_steps': 2e6,          
+        # 'batch_size': 32,              
+        # 'learning_rate': 2e-4,         
+        # 'gradient_accumulate_every': 2,
+        # 'n_train_steps': 500000, # /4
+        # 'batch_size': 256, 
+        'n_train_steps': 50000,          
+        'learning_rate': 5e-5,
+        # 'gradient_accumulate_every': 1,
+
+        'save_freq': 500,
+        'sample_freq': 500,
     },
     'plan': {
         'horizon': 128,
-        'n_diffusion_steps': 64,
+        'n_diffusion_steps': 32,
     },
 }
 
 maze2d_large_v1 = {
     'diffusion': {
         'horizon': 384,
-        'n_diffusion_steps': 256,
-        # 'parameterization': 'v',            # override to v-pred
-        # 'v_posterior': 0.5,                # example non-zero weight
+        'n_diffusion_steps': 128, # original 256
+        'parameterization': 'v',            # override to v-pred
+        'v_posterior': 0.5,                # example non-zero weight
+        # 'n_train_steps': 2e6,          
+        # 'batch_size': 32,              
+        # 'learning_rate': 2e-4,         
+        # 'gradient_accumulate_every': 2,
+        # 'n_train_steps': 500000, # /4
+        # 'batch_size': 256, 
+        'n_train_steps': 50000,          
+        'learning_rate': 5e-5,
+        # 'gradient_accumulate_every': 1,
+
+        'save_freq': 500,
+        'sample_freq': 500,
     },
     'plan': {
         'horizon': 384,
-        'n_diffusion_steps': 256,
+        'n_diffusion_steps': 128,
     },
 }
