@@ -36,6 +36,11 @@ python -m scripts.mpc_eval_maze2d plan \
   --conditional
 ```
 
+- **num_rollouts** (int): number of episodes to execute and average over.  
+- **num_samples** (int): number of candidate trajectories sampled at each replanning step.  
+- **num_segments** (int): how many equal-length segments to split the planning horizon into for periodic replanning.  
+- **temperature** (float): softmax temperature for MPPI weighting; higher values yield flatter weights, lower focus on top trajectories.
+
 ## Visualizations
 Compare our model vs. original pretrained model - In each case, the diffusion timesteps has been reduced by half:
 
