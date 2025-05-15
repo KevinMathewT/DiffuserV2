@@ -1,6 +1,6 @@
 # DiffuserV2
 
-DiffuserV2 extends the [ICML 2022 Diffuser](https://diffusion-planning.github.io/) framework by reframing trajectory planning as a velocity-parameterized diffusion process and layering on two control enhancements: Model Predictive Path Integral (MPPI) sampling to steer trajectories toward high-return regions, and horizon segmentation with periodic replanning to correct drift. Together, these innovations yield smoother, more stable plans, halve the required diffusion steps, and deliver up to a 21% performance boost over the original Diffuser on sparse-reward Maze2D benchmarks—setting a new state-of-the-art in long-horizon navigation.
+DiffuserV2 extends the [ICML 2022 Diffuser](https://diffusion-planning.github.io/) framework by reframing trajectory planning as a **Velocity-Parameterized Diffusion Process** and layering on two control enhancements: **Model Predictive Path Integral (MPPI)** sampling to steer trajectories toward high-return regions, and horizon segmentation with **Periodic Replanning** to correct drift. Together, these innovations yield smoother, more stable plans, halve the required diffusion steps, and deliver up to a 21% performance boost over the original Diffuser on sparse-reward Maze2D benchmarks, setting a new state-of-the-art in long-horizon navigation.
 
 <p align="center">
   <img src="extras/visualizations/no_loop_H128_T32_Pv_v0.gif" width="250"/>
